@@ -18,16 +18,7 @@ is declared as a Core table on ``Base.metadata`` in ``tiled.catalog.orm``.
 
 from __future__ import annotations
 
-from sqlalchemy import (
-    JSON,
-    Column,
-    DateTime,
-    ForeignKey,
-    Index,
-    Integer,
-    String,
-    Table,
-)
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Index, Integer, String, Table
 
 from ..catalog.base import Base
 
