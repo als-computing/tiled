@@ -37,6 +37,12 @@ async def initialize_database(engine: AsyncEngine):
     # The definitions in .orm alter Base.metadata.
     from . import orm  # noqa: F401
 
+    # The graph (splash-links) tables also live in the catalog database and
+    # attach to Base.metadata, so importing them here ensures create_all
+    # provisions them on fresh databases (existing databases get them via the
+    # Alembic migration c31f6a1d7e20).
+    from ..graph import tables  # noqa: F401
+
     async with engine.connect() as connection:
         # Install extensions
         if engine.dialect.name == "postgresql":
