@@ -32,6 +32,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TEXT
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.sql.expression import cast as sql_cast
 
@@ -279,26 +280,38 @@ class GraphSQLAlchemyStore:
         properties: Optional[dict] = None,
         access_blob: Optional[dict] = None,
     ) -> LinkRecord:
-        if not await self.get_entity(subject_id):
-            raise ValueError(f"Subject entity '{subject_id}' not found")
-        if not await self.get_entity(object_id):
-            raise ValueError(f"Object entity '{object_id}' not found")
-
         id_ = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
-        async with self._engine.begin() as conn:
-            await conn.execute(
-                insert(_links).values(
-                    id=id_,
-                    subject_id=subject_id,
-                    predicate=predicate,
-                    object_id=object_id,
-                    properties=properties or {},
-                    access_blob=access_blob or {},
-                    created_at=now,
+        # The subject_id/object_id foreign keys reference entities.id, so the
+        # database rejects a link to a nonexistent entity (SQLite enforces this
+        # too: the shared pool sets PRAGMA foreign_keys=ON). Insert directly and
+        # let the constraint do the checking, rather than pre-querying both
+        # endpoints on every create.
+        try:
+            async with self._engine.begin() as conn:
+                await conn.execute(
+                    insert(_links).values(
+                        id=id_,
+                        subject_id=subject_id,
+                        predicate=predicate,
+                        object_id=object_id,
+                        properties=properties or {},
+                        access_blob=access_blob or {},
+                        created_at=now,
+                    )
                 )
-            )
-            row = (await conn.execute(select(_links).where(_links.c.id == id_))).one()
+                row = (
+                    await conn.execute(select(_links).where(_links.c.id == id_))
+                ).one()
+        except IntegrityError as exc:
+            # A foreign-key violation means one of the endpoints is missing.
+            # Resolve which one only on this failure path so the success path
+            # stays a single INSERT.
+            if not await self.get_entity(subject_id):
+                raise ValueError(f"Subject entity '{subject_id}' not found") from exc
+            if not await self.get_entity(object_id):
+                raise ValueError(f"Object entity '{object_id}' not found") from exc
+            raise
         return self._to_link(row)
 
     async def get_link(self, id: str) -> Optional[LinkRecord]:
