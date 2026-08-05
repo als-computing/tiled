@@ -7,7 +7,7 @@ engine/connection pool used by Tiled's catalog (see
 tables are always served from a single shared pool rather than opening a
 second connection pool to the same database.
 
-The graph tables themselves are defined in ``tiled.graph.tables`` (attached to
+The graph tables themselves are defined in ``tiled.graph.orm`` (attached to
 the catalog's ``Base.metadata``) and provisioned by the catalog's database
 initialization / Alembic migrations. This store only reads and writes rows; it
 does not create tables.
@@ -40,9 +40,9 @@ from ..queries import AccessBlobFilter
 from ..server.connection_pool import get_database_engine
 from ..server.settings import DatabaseSettings
 from ..utils import UnsupportedQueryType
-from .tables import entities as _entities
-from .tables import links as _links
-from .tables import namespaces as _namespaces
+from .orm import entities as _entities
+from .orm import links as _links
+from .orm import namespaces as _namespaces
 
 UNSET = object()
 
@@ -137,7 +137,7 @@ class GraphSQLAlchemyStore:
 
     Use ``from_database_settings`` to attach to the same async engine registry
     used by the rest of the server. The graph tables are provisioned by the
-    catalog database (see ``tiled.graph.tables``); this store does not create
+    catalog database (see ``tiled.graph.orm``); this store does not create
     them.
     """
 
