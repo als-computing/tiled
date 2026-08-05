@@ -5,7 +5,7 @@ Graph model:
   - Entity  — a named node with a type and arbitrary JSON properties
   - Link     — a directed, predicate-labeled edge between two entities
   - Namespace — a CURIE prefix -> URI mapping used to expand/compact terms
-    (property keys and link predicates) for JSON-LD import/export.
+    (property keys and link predicates).
 
 Query highlights:
     - entity / entities — fetch nodes
@@ -20,8 +20,7 @@ Mutations:
 
 Property keys and link predicates are expanded against the namespace
 registry when written and compacted back to CURIEs when read, so a
-prefix registered through `upsertNamespace` (or through JSON-LD import)
-is resolved consistently regardless of which interface wrote the data.
+prefix registered through `upsertNamespace` is resolved consistently.
 """
 
 from __future__ import annotations
