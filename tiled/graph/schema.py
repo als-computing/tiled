@@ -31,6 +31,7 @@ from typing import Optional
 
 import strawberry
 from graphql import GraphQLError
+from strawberry.extensions import QueryDepthLimiter
 from strawberry.scalars import JSON as StrawberryJSON
 from strawberry.types import Info
 from strawberry.types.unset import UNSET, UnsetType
@@ -43,6 +44,13 @@ from .store import UNSET as STORE_UNSET
 from .store import EntityRecord, GraphSQLAlchemyStore, LinkRecord
 
 logger = logging.getLogger(__name__)
+
+# Maximum nesting depth allowed in a single GraphQL query. The entity/link
+# graph is recursively traversable (Entity.outgoingLinks -> Link.object ->
+# Entity.outgoingLinks -> ...), so an unbounded query could force arbitrarily
+# deep and expensive resolution. Introspection queries are exempt (the limiter
+# ignores them by default), so the GraphiQL "Docs" panel is unaffected.
+MAX_QUERY_DEPTH = 10
 
 # ---------------------------------------------------------------------------
 # JSON scalar — pass arbitrary dicts / lists / primitives through GraphQL
@@ -575,4 +583,8 @@ class Mutation:
 # Schema
 # ---------------------------------------------------------------------------
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+schema = strawberry.Schema(
+    query=Query,
+    mutation=Mutation,
+    extensions=[lambda: QueryDepthLimiter(max_depth=MAX_QUERY_DEPTH)],
+)
