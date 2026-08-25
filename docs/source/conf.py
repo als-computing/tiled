@@ -353,3 +353,10 @@ def setup(app):
 suppress_warnings = [
     "etoc.toctree",  # Suppress warnings about unexpected toctree entries
 ]
+
+# These tutorials depend on external network access and local webhook timing.
+# Skip executing them in docs CI to avoid flaky myst-nb execution failures.
+nb_execution_excludepatterns = [
+    "getting-started/10-minutes-to-tiled.md",
+    "getting-started/webhooks.md",
+]

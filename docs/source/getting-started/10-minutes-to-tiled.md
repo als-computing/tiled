@@ -224,7 +224,9 @@ We can open the files here or in any other program. They are now just files on o
 local disk.
 
 ```{code-cell} ipython3
-!cat my_table.csv
+from pathlib import Path
+
+print(Path("my_table.csv").read_text())
 ```
 
 Let's download an image dataset as a PNG file.
