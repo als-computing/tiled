@@ -375,7 +375,9 @@ class AccessTagsCompiler:
                     tag, tags, seen_tags, nested_level + 1
                 )
                 public_auto_tag = public_auto_tag or child_public
-                users.update(child_users)
+                for username, child_scopes in child_users.items():
+                    users.setdefault(username, set())
+                    users[username].update(child_scopes)
             except (RecursionError, ValueError) as e:
                 raise RuntimeError(
                     f"Tag compilation failed at tag: {current_tag}"

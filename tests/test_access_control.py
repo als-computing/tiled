@@ -547,6 +547,95 @@ def test_access_tag_compiler(compile_access_tags_db_with_reset):
     assert bool(cursor.fetchone()[0])
 
 
+def test_access_tag_compiler_does_not_leak_scopes_across_shared_auto_tag():
+    """
+    Regression test: a group that is shared between two tags via `auto_tags`
+    must not have its compiled scopes escalated on one tag just because a
+    sibling tag grants that same physical group broader scopes directly.
+
+    This mirrors the "raw"/"processed" pattern used by downstream
+    consumers: a low-privilege tag and a high-privilege tag both pull in a
+    shared group tag (e.g. beamline staff) via `auto_tags`, and the
+    high-privilege tag *also* grants that same group elevated scopes
+    directly. The elevation must stay local to the high-privilege tag.
+    """
+    scopes = {
+        "read:data",
+        "read:metadata",
+        "write:data",
+        "write:metadata",
+        "create:node",
+    }
+    tag_config = {
+        "roles": {
+            "facility_user": {"scopes": ["read:data", "read:metadata"]},
+            "data_contributor": {
+                "scopes": [
+                    "read:data",
+                    "read:metadata",
+                    "write:data",
+                    "write:metadata",
+                    "create:node",
+                ]
+            },
+        },
+        "tags": {
+            "staff_tag": {
+                "groups": [{"name": "staff", "role": "facility_user"}],
+            },
+            "raw_tag": {
+                "groups": [{"name": "staff", "role": "facility_user"}],
+                "auto_tags": [{"name": "staff_tag"}],
+            },
+            "processed_tag": {
+                "groups": [{"name": "staff", "role": "data_contributor"}],
+                "auto_tags": [{"name": "staff_tag"}],
+            },
+        },
+        "tag_owners": {},
+    }
+
+    def group_parser(groupname):
+        return {"staff": ["pat"]}[groupname]
+
+    access_tags_compiler = AccessTagsCompiler(
+        scopes,
+        tag_config,
+        {"uri": "file:compiled_tags_leak_test?mode=memory&cache=shared"},
+        group_parser,
+    )
+    access_tags_compiler.load_tag_config()
+    access_tags_compiler.compile()
+
+    db = sqlite3.connect(
+        "file:compiled_tags_leak_test?mode=memory&cache=shared", uri=True
+    )
+    cursor = db.cursor()
+
+    def scopes_for(tag_name):
+        cursor.execute(
+            "SELECT scope_name FROM user_tag_scopes WHERE tag_name = ? AND user_name = ?;",
+            (tag_name, "pat"),
+        )
+        return {row[0] for row in cursor.fetchall()}
+
+    # the shared staff tag and the tag that only auto_tags it must stay
+    # read-only, even though processed_tag grants the same physical group
+    # write scopes directly.
+    assert scopes_for("staff_tag") == {"read:data", "read:metadata"}
+    assert scopes_for("raw_tag") == {"read:data", "read:metadata"}
+    assert scopes_for("processed_tag") == {
+        "read:data",
+        "read:metadata",
+        "write:data",
+        "write:metadata",
+        "create:node",
+    }
+
+    access_tags_compiler.connection.close()
+    db.close()
+
+
 def test_basic_access_control(access_control_test_context_factory):
     """
     Test that basic access control and tag compilation are working.
