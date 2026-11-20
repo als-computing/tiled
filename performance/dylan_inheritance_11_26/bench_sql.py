@@ -21,8 +21,8 @@ Compare two labels with compare.py.
 
 Usage:
 
-    python performance/bench_sql.py --label branch
-    PYTHONPATH=../tiled-perf-base python performance/bench_sql.py --label base
+    python performance/dylan_inheritance_11_26/bench_sql.py --label branch
+    PYTHONPATH=../tiled-perf-base python performance/dylan_inheritance_11_26/bench_sql.py --label base
 """
 
 import argparse

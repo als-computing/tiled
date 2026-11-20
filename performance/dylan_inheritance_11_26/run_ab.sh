@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Benchmark the base commit and the current checkout, then compare them.
 #
-#   performance/run_ab.sh --build        # build both databases, then benchmark
-#   performance/run_ab.sh                # benchmark existing databases
-#   BASE=main performance/run_ab.sh      # any commit-ish (default: merge-base
+#   performance/dylan_inheritance_11_26/run_ab.sh --build        # build both databases, then benchmark
+#   performance/dylan_inheritance_11_26/run_ab.sh                # benchmark existing databases
+#   BASE=main performance/dylan_inheritance_11_26/run_ab.sh      # any commit-ish (default: merge-base
 #                                        # with upstream/main)
-#   performance/run_ab.sh --only deep    # other args go to bench_sql.py
-#   BUILD_ARGS="--children 1000000" performance/run_ab.sh --build
+#   performance/dylan_inheritance_11_26/run_ab.sh --only deep    # other args go to bench_sql.py
+#   BUILD_ARGS="--children 1000000" performance/dylan_inheritance_11_26/run_ab.sh --build
 #
 # The base is checked out (detached) into a sibling git worktree, and
 # PYTHONPATH points the scripts at it. Each version gets its own database,
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(cd "$HERE/.." && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
 PY=${PY:-$REPO/.pixi/envs/py313/bin/python}
 BASE=${BASE:-$(git -C "$REPO" merge-base HEAD upstream/main)}
 WORKTREE=${WORKTREE:-$REPO/../tiled-perf-base}

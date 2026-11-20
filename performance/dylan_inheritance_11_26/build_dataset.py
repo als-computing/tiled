@@ -42,7 +42,8 @@ is created if it does not exist.
 
 Usage:
 
-    python performance/build_dataset.py --uri postgresql+asyncpg://tiled:tiled@localhost:5433/tiled_perf --reset
+    python performance/dylan_inheritance_11_26/build_dataset.py \
+        --uri postgresql+asyncpg://tiled:tiled@localhost:5433/tiled_perf --reset
 """
 
 import argparse

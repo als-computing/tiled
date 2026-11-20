@@ -1,7 +1,9 @@
 """
 Compare two bench_sql.py runs side by side.
 
-    python performance/compare.py performance/results/base performance/results/branch
+    python performance/dylan_inheritance_11_26/compare.py \
+        performance/dylan_inheritance_11_26/results/base \
+        performance/dylan_inheritance_11_26/results/branch
 
 Prints the median time of each scenario in both runs and the ratio
 (second / first). Result counts that differ are flagged with '*': that is

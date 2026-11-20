@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Start or stop a throwaway PostgreSQL server for the access-tag benchmarks.
 #
-#   performance/postgres.sh start   # listens on 127.0.0.1:${PGPORT:-5433} only
-#   performance/postgres.sh stop    # removes the container and its data
+#   performance/dylan_inheritance_11_26/postgres.sh start   # listens on 127.0.0.1:${PGPORT:-5433} only
+#   performance/dylan_inheritance_11_26/postgres.sh stop    # removes the container and its data
 #
 # Uses podman if available, otherwise docker.
 set -euo pipefail
