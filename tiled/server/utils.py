@@ -199,14 +199,11 @@ async def filter_for_access(
                     if isinstance(query, AccessTagsFilter) and hasattr(
                         entry, "resolve_access_tag_ids"
                     ):
-                        # Copy rather than mutate: these fields are specific to
+                        # Copy rather than mutate: 'tag_ids' is specific to
                         # this entry, and the policy may reuse its query objects.
                         query = dataclasses.replace(
                             query,
                             tag_ids=await entry.resolve_access_tag_ids(query.tags),
-                            search_root_inherits_match=not set(query.tags).isdisjoint(
-                                await entry.inheritable_access_tags()
-                            ),
                         )
                     entry = entry.search(query)
     return entry

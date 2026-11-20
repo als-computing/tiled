@@ -549,13 +549,6 @@ class AccessTagsFilter:
     tag_ids: list[int] | None = field(
         default=None, compare=False, metadata={"internal": True}
     )
-    # Server-internal field, like 'tag_ids': whether the tags that the search
-    # root's untagged children inherit include one of 'tags'. Populated by
-    # 'tiled.server.utils.filter_for_access'; when None, the catalog query
-    # builder works it out in SQL instead.
-    search_root_inherits_match: bool | None = field(
-        default=None, compare=False, metadata={"internal": True}
-    )
 
     def __post_init__(self):
         if isinstance(self.tags, str):
