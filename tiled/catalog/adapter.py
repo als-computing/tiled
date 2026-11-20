@@ -40,6 +40,7 @@ from sqlalchemy import (
     true,
     type_coerce,
     union,
+    union_all,
     update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, REGCONFIG, TEXT
@@ -654,9 +655,26 @@ class CatalogNodeAdapter:
             return DataSource.from_orm(data_sources[0], include_assets=False).structure
         return None
 
-    def apply_conditions(self, statement):
+    def apply_conditions(self, statement, *, single_child=False):
+        """Apply the search conditions and access filters to `statement`.
+
+        With `single_child`, the statement selects one child by key, and the
+        access filters check only that child rather than listing every child
+        that passes.
+        """
         conditions = list(self.conditions)
-        if not self.deep:
+        if self.deep:
+            # Deep search applies the access filters in `_scope_statement`.
+            pass
+        elif single_child:
+            dialect_name = self.context.engine.dialect.name
+            conditions.extend(
+                _single_child_access_condition(
+                    query, orm.Node, self.node.id, dialect_name
+                )
+                for query, _ in self.access_filters
+            )
+        else:
             conditions.extend(clause for _, clause in self.access_filters)
         # IF this is a sqlite database and we are doing a full text MATCH
         # query, we need a JOIN with the FTS5 virtual table.
@@ -769,7 +787,8 @@ class CatalogNodeAdapter:
             return await first_level.lookup_adapter(segments[1:])
 
         statement = node_from_segments(segments, root_id=self.node.id)
-        statement = self.apply_conditions(statement)  # Conditions on the child node
+        # Conditions on the child node
+        statement = self.apply_conditions(statement, single_child=len(segments) == 1)
         statement = statement.options(
             selectinload(orm.Node.data_sources).selectinload(orm.DataSource.structure)
         )
@@ -2946,6 +2965,35 @@ def _access_tags_predicate(query, node, parent_id, dialect_name):
         _inherited_tags_match(query, parent_id, dialect_name),
     )
     return node.id.in_(union(tagged, untagged))
+
+
+def _single_child_access_condition(query, node, parent_id, dialect_name):
+    """SQL condition: `node`, one child of `parent_id`, passes the filter `query`.
+
+    The same rule as `_access_tags_predicate`, for a statement that selects a
+    single child. It looks up that child's own tag rows and its row in
+    `untagged_nodes` by primary key, so its cost does not depend on how many
+    children the container has.
+    """
+    if not query.tags or query.tag_ids == []:
+        # Nothing can match an empty list, or tags none of which exist.
+        return false()
+    association = orm.NodeAccessTagAssociation
+    tagged = _matching_tag_rows(query, dialect_name).where(
+        association.node_id == node.id
+    )
+    if parent_id == ROOT_NODE_ID:
+        # Untagged children of the catalog root inherit nothing.
+        return tagged.exists()
+    untagged = select(orm.UntaggedNode.node_id).where(
+        orm.UntaggedNode.node_id == node.id,
+        _inherited_tags_match(query, parent_id, dialect_name),
+    )
+    # One EXISTS over both cases rather than an OR of two. PostgreSQL may
+    # evaluate an EXISTS inside an OR by hashing every row it could match,
+    # here every assignment of the query's tags in the catalog; it cannot do
+    # that with a UNION ALL, so it probes the child's rows by index.
+    return union_all(tagged, untagged).exists()
 
 
 def _deep_access_condition(query, search_root_id, dialect_name):
