@@ -11,7 +11,11 @@ from ..queries import AccessTagsFilter
 from ..server.schemas import Principal
 from ..type_aliases import AccessTags, Filters, Scopes
 from ..utils import Sentinel, import_object
-from .protocols import AccessPolicy, normalize_access_tags
+from .protocols import (
+    AccessPolicy,
+    get_effective_access_tags,
+    normalize_access_tags,
+)
 from .scopes import ALL_SCOPES, NO_SCOPES, PUBLIC_SCOPES, ScopeName, validate_scopes
 
 ALL_ACCESS = []
@@ -396,15 +400,10 @@ class TagBasedAccessPolicy(AccessPolicy):
                 else set()
             )
 
+            allowed = set()
             # A node with no tags of its own inherits its nearest tagged
             # ancestor's, consistent with the AccessTagsFilter in `filters`.
-            if hasattr(node, "effective_access_tags"):
-                access_tags = await node.effective_access_tags()
-            else:
-                access_tags = node.access_tags
-
-            allowed = set()
-            for tag in access_tags:
+            for tag in await get_effective_access_tags(node):
                 if authn_access_tags is not None:
                     if tag not in authn_access_tags:
                         continue
@@ -628,7 +627,7 @@ class ExternalPolicyDecisionPoint(AccessPolicy, ABC):
                 principal,
                 authn_access_tags,
                 authn_scopes,
-                getattr(node, "access_tags", None),
+                await get_effective_access_tags(node),
             ),
             ResultHolder[set[str]],
         )

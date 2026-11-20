@@ -30,6 +30,18 @@ def normalize_access_tags(tags: Iterable[str] = ()) -> AccessTags:
     return frozenset(tags)
 
 
+async def get_effective_access_tags(node: BaseAdapter) -> AccessTags | None:
+    """
+    The access tags in effect on a node, including any it inherits.
+
+    Falls back to the node's own access tags for adapters that do not
+    support inheritance, and to None for adapters without access tags.
+    """
+    if hasattr(node, "effective_access_tags"):
+        return await node.effective_access_tags()
+    return getattr(node, "access_tags", None)
+
+
 class AccessPolicy(ABC):
     @abstractmethod
     async def init_node(
