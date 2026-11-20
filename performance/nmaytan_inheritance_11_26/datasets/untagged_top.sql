@@ -15,7 +15,7 @@ INSERT INTO nodes(id, key, parent, structure_family, metadata, specs)
 VALUES (4, 'U', 0, 'container', '{}', '[]');
 
 INSERT INTO nodes(id, key, parent, structure_family, metadata, specs)
-SELECT 5000000 + i, 'u' || i, 4, 'array', '{}', '[]'
+SELECT 5000000 + i, 'u' || i, 4, 'container', '{}', '[]'
 FROM generate_series(0, 499999) i;
 
 -- Later datasets take their ids from the sequence, above these.

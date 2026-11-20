@@ -104,10 +104,8 @@ the version without inheritance.
 | `hidden_block` | `block/l2/l3/` holding 1,000 visible children, then `X` (tagged other) with 500,500 untagged descendants, then 1,000 untagged children; `block_tagged/`, its tagged twin | One large hidden subtree below the root, whose ids form one block that a deep-search page must skip |
 | `writes` | `writes/` (empty), `writes_big/` with 100,000 untagged children | Targets for the write scenarios, which restore them after every run |
 
-The children of P, Q and U are bare `array` rows with no data source, which
-keeps these large datasets quick to build. The server cannot build a response
-for them, so the response scenarios use the other datasets, whose children
-are containers.
+The children of P, Q and U are empty containers, which keeps these large
+datasets quick to build.
 
 **The grid.** `runs` and `grid` are built by one generator,
 `pg_temp.catalog` in `datasets/functions.sql`: a container of runs, each with

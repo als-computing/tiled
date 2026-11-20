@@ -367,9 +367,7 @@ async def _remove_root_untagged(b):
 def read_scenarios():
     s = []
     # Large listings (base.sql). P: most children visible, 30% by
-    # inheritance. Q: few visible. Their children are bare array rows with no
-    # data source, so the server cannot build responses for them: the
-    # response scenarios use the other datasets.
+    # inheritance. Q: few visible.
     for name in ["P", "Q"]:
         s += container_scenarios(
             name,

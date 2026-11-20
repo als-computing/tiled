@@ -27,10 +27,10 @@ UNION ALL SELECT 2, id FROM access_tags WHERE name = 'tagA'
 UNION ALL SELECT 3, id FROM access_tags WHERE name = 'tagA';
 
 INSERT INTO nodes(id, key, parent, structure_family, metadata, specs)
-SELECT 10 + i, 'p' || i, 2, 'array', '{}', '[]' FROM generate_series(0, 999999) i;
+SELECT 10 + i, 'p' || i, 2, 'container', '{}', '[]' FROM generate_series(0, 999999) i;
 
 INSERT INTO nodes(id, key, parent, structure_family, metadata, specs)
-SELECT 2000000 + i, 'q' || i, 3, 'array', '{}', '[]' FROM generate_series(0, 999999) i;
+SELECT 2000000 + i, 'q' || i, 3, 'container', '{}', '[]' FROM generate_series(0, 999999) i;
 
 -- P: i % 10 in 0..4 -> tagA, 5..7 -> untagged, 8..9 -> tagB
 INSERT INTO node_access_tags_association(node_id, tag_id)
