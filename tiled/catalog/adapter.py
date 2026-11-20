@@ -2045,10 +2045,15 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         for a secondary column.
         """
         if cursor is not None:
+            # In deep mode, the same bound on the closure rows lets their scan
+            # start at the cursor too; the database does not infer it.
+            ids = [orm.Node.id]
+            if self.deep:
+                ids.append(orm.NodesClosure.descendant)
             if self.default_sorting_direction == 1:
-                statement = statement.filter(orm.Node.id > cursor)
+                statement = statement.filter(*(id_ > cursor for id_ in ids))
             else:
-                statement = statement.filter(orm.Node.id < cursor)
+                statement = statement.filter(*(id_ < cursor for id_ in ids))
         statement = self.apply_conditions(statement).order_by(*self.order_by_clauses)
         if limit is not None:
             statement = statement.limit(limit + 1)
