@@ -293,8 +293,16 @@ async def construct_entries_response(
     # This value will not leak out. It just used to seed comparisons.
     metadata_stale_at = datetime.now(UTC) + timedelta(days=1_000_000)
     must_revalidate = getattr(tree, "must_revalidate", True)
+    effective_access_tags = [None] * len(items)
+    if schemas.EntryFields.effective_access_tags in fields and hasattr(
+        tree, "effective_access_tags_of"
+    ):
+        # One lookup for the page, rather than one per entry.
+        effective_access_tags = await tree.effective_access_tags_of(
+            [entry for _, entry in items]
+        )
     data = []
-    for key, entry in items:
+    for (key, entry), entry_effective_access_tags in zip(items, effective_access_tags):
         # In deep mode, `key` is a "/"-joined path relative to `tree`
         # (e.g. "nested/images/sample_042"), not a single child key, since
         # matches at different depths may share a local key. Split it so
@@ -312,6 +320,7 @@ async def construct_entries_response(
             media_type,
             max_depth=max_depth,
             exact_count_limit=exact_count_limit,
+            effective_access_tags=entry_effective_access_tags,
         )
         data.append(resource)
         # If any entry has entry.metadata_stale_at = None, then there will
@@ -489,7 +498,15 @@ async def construct_resource(
     max_depth,
     exact_count_limit,
     depth=0,
+    effective_access_tags=None,
 ):
+    """
+    Construct the resource for one entry.
+
+    `effective_access_tags`, if given, is used for that field instead of
+    asking the entry, so that a caller can look them up for many entries at
+    once.
+    """
     path_str = "/".join(path_parts)
     id_ = path_parts[-1] if path_parts else ""
     attributes = {"ancestors": path_parts[:-1]}
@@ -515,6 +532,11 @@ async def construct_resource(
         attributes["access_tags"] = (
             sorted(access_tags) if access_tags is not None else None
         )
+    if schemas.EntryFields.effective_access_tags in fields:
+        if effective_access_tags is None and hasattr(entry, "effective_access_tags"):
+            effective_access_tags = await entry.effective_access_tags()
+        if effective_access_tags is not None:
+            attributes["effective_access_tags"] = sorted(effective_access_tags)
     if schemas.EntryFields.specs in fields:
         attributes["specs"] = []
         for spec in getattr(entry, "specs", []):

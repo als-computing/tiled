@@ -299,6 +299,18 @@ class BaseClient:
         return ListView(access_tags)
 
     @property
+    def effective_access_tags(self) -> ListView[str]:
+        """
+        Access tags in effect on this node: its own access tags or, if it has
+        none, those of its nearest ancestor that has access tags. The catalog
+        root's access tags are not inherited.
+        """
+        effective_access_tags = self._item["attributes"].get("effective_access_tags")
+        if effective_access_tags is None:
+            raise AttributeError("Node has no attribute 'effective_access_tags'")
+        return ListView(effective_access_tags)
+
+    @property
     def uri(self):
         "Direct link to this entry"
         return self.item["links"]["self"]
@@ -869,6 +881,16 @@ class BaseClient:
                 self._item["attributes"]["access_tags"] = patcher(
                     list(self.access_tags), access_tags_patch, content_type
                 )
+            self._update_effective_access_tags()
+
+    def _update_effective_access_tags(self):
+        # Own access tags are in effect if present; otherwise the inherited
+        # tags are not known locally until the node is fetched again.
+        attributes = self._item["attributes"]
+        if attributes.get("access_tags"):
+            attributes["effective_access_tags"] = list(attributes["access_tags"])
+        else:
+            attributes.pop("effective_access_tags", None)
 
     def replace_metadata(
         self, metadata=None, specs=None, access_tags=None, drop_revision=False
@@ -938,6 +960,7 @@ class BaseClient:
                 self._item["attributes"]["access_tags"] = content["access_tags"]
             else:
                 self._item["attributes"]["access_tags"] = access_tags
+            self._update_effective_access_tags()
 
     @property
     def metadata_revisions(self):

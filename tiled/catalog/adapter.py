@@ -495,6 +495,38 @@ class CatalogNodeAdapter:
             )
         return normalize_access_tags(inheritable_tags)
 
+    async def effective_access_tags_of(self, entries):
+        """The effective access tags of several entries, such as a page of
+        results, with at most one query.
+
+        Returns a list in the order of `entries`. Untagged entries with the
+        same parent share their inherited tags, so they are looked up once
+        per parent rather than once per entry. An entry that is not a catalog
+        node gets its own `access_tags`, or None if it has none.
+        """
+        parent_ids = {
+            entry.node.parent
+            for entry in entries
+            if isinstance(entry, CatalogNodeAdapter) and not entry.access_tags
+        }
+        inherited = {parent_id: set() for parent_id in parent_ids}
+        # Untagged children of the catalog root inherit nothing.
+        parent_ids.discard(ROOT_NODE_ID)
+        if parent_ids:
+            async with self.context.session() as db:
+                rows = await db.execute(_nearest_tagged_ancestor_tags_of(parent_ids))
+            for parent_id, name in rows:
+                inherited[parent_id].add(name)
+        result = []
+        for entry in entries:
+            if not isinstance(entry, CatalogNodeAdapter):
+                result.append(getattr(entry, "access_tags", None))
+            elif entry.access_tags:
+                result.append(entry.access_tags)
+            else:
+                result.append(normalize_access_tags(inherited[entry.node.parent]))
+        return result
+
     def metadata(self):
         return self.node.metadata_
 
@@ -2812,6 +2844,36 @@ def _nearest_tagged_ancestor_tags(node_id):
             orm.NodesClosure.ancestor == orm.NodeAccessTagAssociation.node_id,
         )
         .where(orm.NodesClosure.descendant == node_id)
+        .where(orm.NodesClosure.depth == nearest_depth)
+    )
+
+
+def _nearest_tagged_ancestor_tags_of(node_ids):
+    """SELECT (node id, tag name) pairs: for each of `node_ids`, the tag
+    names of the nearest node at or above it that has tags.
+
+    As `_nearest_tagged_ancestor_tags`, for several nodes in one statement.
+    """
+    nearest = aliased(orm.NodesClosure)
+    nearest_tagged = aliased(orm.NodeAccessTagAssociation)
+    nearest_depth = (
+        select(func.min(nearest.depth))
+        .join(nearest_tagged, nearest_tagged.node_id == nearest.ancestor)
+        .where(nearest.descendant == orm.NodesClosure.descendant)
+        .where(nearest.ancestor != ROOT_NODE_ID)
+        .scalar_subquery()
+    )
+    return (
+        select(orm.NodesClosure.descendant, orm.AccessTag.name)
+        .join(
+            orm.NodeAccessTagAssociation,
+            orm.NodeAccessTagAssociation.tag_id == orm.AccessTag.id,
+        )
+        .join(
+            orm.NodesClosure,
+            orm.NodesClosure.ancestor == orm.NodeAccessTagAssociation.node_id,
+        )
+        .where(orm.NodesClosure.descendant.in_(sorted(node_ids)))
         .where(orm.NodesClosure.depth == nearest_depth)
     )
 

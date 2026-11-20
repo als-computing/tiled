@@ -3132,6 +3132,7 @@ def _model_dump_backcompat(request: Request, response: schemas.Response) -> dict
     if client_expects_access_blob(client_version):
         for resource in resources:
             attributes = resource.get("attributes") or {}
+            attributes.pop("effective_access_tags", None)
             if "access_tags" in attributes:
                 attributes["access_blob"] = access_blob_from_access_tags(
                     attributes.pop("access_tags")

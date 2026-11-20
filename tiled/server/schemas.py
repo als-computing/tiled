@@ -87,6 +87,7 @@ class EntryFields(enum.StrEnum):
     data_sources = "data_sources"
     none = ""
     access_tags = "access_tags"
+    effective_access_tags = "effective_access_tags"
 
 
 class NodeStructure(pydantic.BaseModel):
@@ -221,6 +222,8 @@ class NodeAttributes(pydantic.BaseModel):
     ) = None
     # list of tags that control access to this node
     access_tags: list[str] | None = None
+    # access_tags, or if empty those of the nearest ancestor that has tags
+    effective_access_tags: list[str] | None = None
 
     sorting: list[SortingItem] | None = None
     data_sources: list[DataSource] | None = None
