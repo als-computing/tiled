@@ -1700,7 +1700,7 @@ def test_access_conditions_match_resolved_tag_ids(deep):
     query = AccessTagsFilter(["a"])
     query.tag_ids = [3]
     if deep:
-        condition = _deep_access_condition(query, 7, "postgresql")
+        condition = _deep_access_condition(query, 7, [], "postgresql")
     else:
         condition = _access_tags_predicate(query, catalog_orm.Node, 7, "postgresql")
     sql = str(
@@ -1710,9 +1710,9 @@ def test_access_conditions_match_resolved_tag_ids(deep):
         )
     )
     assert "access_tags.name" not in sql
-    # One match on tagged nodes (in deep search, the blockers) and one on the
-    # inherited tags.
-    assert sql.count("= ANY (ARRAY[3])") == 2
+    # One match on tagged nodes (in deep search, the blockers) and, in a
+    # listing, one on the inherited tags. Deep search checks those first.
+    assert sql.count("= ANY (ARRAY[3])") == (1 if deep else 2)
 
 
 @pytest.mark.parametrize("deep", [False, True])
@@ -1720,7 +1720,7 @@ def test_access_conditions_with_no_existing_tags_match_nothing(deep):
     query = AccessTagsFilter(["undefined"])
     query.tag_ids = []
     if deep:
-        condition = _deep_access_condition(query, 7, "postgresql")
+        condition = _deep_access_condition(query, 7, [], "postgresql")
     else:
         condition = _access_tags_predicate(query, catalog_orm.Node, 7, "postgresql")
     assert str(condition.compile(dialect=postgresql_dialect.dialect())) == "false"

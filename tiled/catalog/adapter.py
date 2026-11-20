@@ -586,8 +586,9 @@ class CatalogNodeAdapter:
         return f"<{type(self).__name__} {self.key}>"
 
     async def __aiter__(self):
-        statement = self._scoped(select(orm.Node.key, orm.Node.id))
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            statement = self._scoped(select(orm.Node.key, orm.Node.id), hidden_children)
             rows = (await db.execute(statement.order_by(*self.order_by_clauses))).all()
         if self.deep:
             relative_keys = await self.relative_keys_for_ids([row[1] for row in rows])
@@ -701,10 +702,11 @@ class CatalogNodeAdapter:
 
     async def exact_len(self):
         "Get the exact number of child (or, in deep mode, descendant) nodes."
-        statement = self._scope_statement(select(func.count()).select_from(orm.Node))
-        statement = self.apply_conditions(statement)
-
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            statement = self._scoped(
+                select(func.count()).select_from(orm.Node), hidden_children
+            )
             return (await db.execute(statement)).scalar_one()
 
     async def approx_len(self) -> int | None:
@@ -761,13 +763,13 @@ class CatalogNodeAdapter:
         containers. If result is <= `threshold`, it is exact.
         """
 
-        limited = self._scope_statement(select(literal(1)).select_from(orm.Node)).limit(
-            threshold + 1
-        )
-        limited = self.apply_conditions(limited).cte("limited")
-        statement = select(func.count()).select_from(limited)
-
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            limited = self._scope_statement(
+                select(literal(1)).select_from(orm.Node), hidden_children
+            ).limit(threshold + 1)
+            limited = self.apply_conditions(limited).cte("limited")
+            statement = select(func.count()).select_from(limited)
             return (await db.execute(statement)).scalar_one()
 
     async def lookup_adapter(self, segments: list[str]):
@@ -1065,7 +1067,36 @@ class CatalogNodeAdapter:
             )
         return self.new_variation(deep=True, max_depth=max_depth)
 
-    def _scope_statement(self, statement):
+    async def _hidden_untagged_children(self, db):
+        """In deep mode, this node's untagged children hidden by each access filter.
+
+        Returns one list of node ids per entry of `self.access_filters`, for
+        `_scope_statement`, or None when not in deep mode. The untagged
+        children inherit this node's tags, which `_deep_access_condition` does
+        not see on the paths it checks. Untagged children of the catalog root
+        inherit nothing, so they are always hidden; elsewhere only when their
+        inherited tags do not match, which is rare: a user reaches this node
+        through matching tags.
+
+        Run separately, before the statement it is for, so that the database
+        plans that statement knowing which nodes they are.
+        """
+        if not self.deep:
+            return None
+        dialect_name = self.context.engine.dialect.name
+        hidden_children = []
+        for query, _ in self.access_filters:
+            statement = select(orm.UntaggedNode.node_id).where(
+                orm.UntaggedNode.parent_id == self.node.id
+            )
+            if self.node.id != ROOT_NODE_ID:
+                statement = statement.where(
+                    not_(_inherited_tags_match(query, self.node.id, dialect_name))
+                )
+            hidden_children.append(list((await db.execute(statement)).scalars()))
+        return hidden_children
+
+    def _scope_statement(self, statement, hidden_children):
         """Restrict a `SELECT ... FROM nodes` statement to the nodes in scope.
 
         By default (self.deep is False), scope is this node's direct
@@ -1074,7 +1105,8 @@ class CatalogNodeAdapter:
         When self.deep is True, scope is ALL descendants of this node
         (any depth), found via the `nodes_closure` table, which is kept up
         to date by DB triggers (see orm.py). `self.max_depth`, if set, bounds
-        how many levels below this node to include.
+        how many levels below this node to include. `hidden_children` is
+        the result of `_hidden_untagged_children`.
         """
         if not self.deep:
             return statement.filter(orm.Node.parent == self.node.id)
@@ -1084,9 +1116,11 @@ class CatalogNodeAdapter:
         if self.max_depth is not None:
             statement = statement.where(orm.NodesClosure.depth <= self.max_depth)
         dialect_name = self.context.engine.dialect.name
-        for query, _ in self.access_filters:
+        for (query, _), hidden in zip(
+            self.access_filters, hidden_children, strict=True
+        ):
             statement = statement.where(
-                _deep_access_condition(query, self.node.id, dialect_name)
+                _deep_access_condition(query, self.node.id, hidden, dialect_name)
             )
         return statement
 
@@ -1129,9 +1163,9 @@ class CatalogNodeAdapter:
     def sort(self, sorting):
         return self.new_variation(sorting=sorting)
 
-    def _scoped(self, statement):
+    def _scoped(self, statement, hidden_children):
         "Restrict a `SELECT ... FROM nodes` to the nodes in scope that match the conditions."
-        return self.apply_conditions(self._scope_statement(statement))
+        return self.apply_conditions(self._scope_statement(statement, hidden_children))
 
     async def get_distinct(self, metadata, structure_families, specs, counts):
         if self.node.data_sources:
@@ -1141,6 +1175,7 @@ class CatalogNodeAdapter:
         data = {}
 
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
             if metadata:
                 data["metadata"] = {}
                 for key in metadata:
@@ -1151,7 +1186,9 @@ class CatalogNodeAdapter:
                         columns = (clause, func.count(clause))
                     else:
                         columns = (clause,)
-                    statement = self._scoped(select(*columns)).group_by(clause)
+                    statement = self._scoped(
+                        select(*columns), hidden_children
+                    ).group_by(clause)
                     results = (await db.execute(statement)).all()
                     data["metadata"][key] = format_distinct_result(results, counts)
 
@@ -1163,7 +1200,7 @@ class CatalogNodeAdapter:
                     )
                 else:
                     columns = (orm.Node.structure_family,)
-                statement = self._scoped(select(*columns)).group_by(
+                statement = self._scoped(select(*columns), hidden_children).group_by(
                     orm.Node.structure_family
                 )
                 results = (await db.execute(statement)).all()
@@ -1175,7 +1212,9 @@ class CatalogNodeAdapter:
                     columns = (orm.Node.specs, func.count(orm.Node.specs))
                 else:
                     columns = (orm.Node.specs,)
-                statement = self._scoped(select(*columns)).group_by(orm.Node.specs)
+                statement = self._scoped(select(*columns), hidden_children).group_by(
+                    orm.Node.specs
+                )
                 results = (await db.execute(statement)).all()
 
                 data["specs"] = format_distinct_result(results, counts)
@@ -2095,11 +2134,12 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return [], None
 
-        statement = select(orm.Node.key, orm.Node.id)
-        statement = self._scope_statement(statement)
-        statement = self._apply_cursor_pagination(statement, cursor, limit)
-
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            statement = self._scope_statement(
+                select(orm.Node.key, orm.Node.id), hidden_children
+            )
+            statement = self._apply_cursor_pagination(statement, cursor, limit)
             rows = (await db.execute(statement)).all()
 
         next_cursor = None
@@ -2128,15 +2168,18 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return []
 
-        statement = select(orm.Node.key, orm.Node.id)
-        statement = self._scope_statement(statement)
-        if offset:
-            statement = statement.offset(offset)
-        statement = self.apply_conditions(statement).order_by(*self.order_by_clauses)
-        if limit is not None:
-            statement = statement.limit(limit)
-
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            statement = self._scope_statement(
+                select(orm.Node.key, orm.Node.id), hidden_children
+            )
+            if offset:
+                statement = statement.offset(offset)
+            statement = self.apply_conditions(statement).order_by(
+                *self.order_by_clauses
+            )
+            if limit is not None:
+                statement = statement.limit(limit)
             rows = (await db.execute(statement)).all()
 
         if self.deep:
@@ -2180,10 +2223,10 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return [], None
 
-        statement = self._scope_statement(select(orm.Node))
-        statement = self._apply_cursor_pagination(statement, cursor, limit)
-
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            statement = self._scope_statement(select(orm.Node), hidden_children)
+            statement = self._apply_cursor_pagination(statement, cursor, limit)
             nodes = (await db.execute(statement)).scalars().all()
 
         next_cursor = None
@@ -2223,14 +2266,16 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return []
 
-        statement = self._scope_statement(select(orm.Node))
-        if offset:
-            statement = statement.offset(offset)
-        statement = self.apply_conditions(statement).order_by(*self.order_by_clauses)
-        if limit is not None:
-            statement = statement.limit(limit)
-
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            statement = self._scope_statement(select(orm.Node), hidden_children)
+            if offset:
+                statement = statement.offset(offset)
+            statement = self.apply_conditions(statement).order_by(
+                *self.order_by_clauses
+            )
+            if limit is not None:
+                statement = statement.limit(limit)
             nodes = (await db.execute(statement)).scalars().all()
 
         relative_keys = (
@@ -2264,11 +2309,11 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
             # so offset - 1 is the correct "previous item" cursor here.
             return offset - 1
 
-        statement = self._scope_statement(select(orm.Node.id))
-        statement = self.apply_conditions(statement).order_by(*self.order_by_clauses)
-        statement = statement.offset(offset - 1).limit(1)
-
         async with self.context.session() as db:
+            hidden_children = await self._hidden_untagged_children(db)
+            statement = self._scoped(select(orm.Node.id), hidden_children)
+            statement = statement.order_by(*self.order_by_clauses)
+            statement = statement.offset(offset - 1).limit(1)
             row = (await db.execute(statement)).first()
 
         return row[0] if row is not None else None
@@ -3001,7 +3046,7 @@ def _single_child_access_condition(query, node, parent_id, dialect_name):
     return union_all(tagged, untagged).exists()
 
 
-def _deep_access_condition(query, search_root_id, dialect_name):
+def _deep_access_condition(query, search_root_id, hidden_children, dialect_name):
     """SQL condition on a deep-search candidate: it may be seen under `query`.
 
     The candidate is `orm.Node`, joined to `orm.NodesClosure` from the search
@@ -3017,7 +3062,8 @@ def _deep_access_condition(query, search_root_id, dialect_name):
     - a node on its path below the search root, itself included, is tagged
       with none of the query's tags; or
     - it is, or is below, an untagged child of the search root, and the tags
-      that child inherits do not match.
+      that child inherits do not match. `hidden_children` lists those
+      children; see `CatalogNodeAdapter._hidden_untagged_children`.
     """
     if not query.tags or query.tag_ids == []:
         # Nothing can match an empty list, or tags none of which exist.
@@ -3051,24 +3097,19 @@ def _deep_access_condition(query, search_root_id, dialect_name):
         )
         .exists()
     )
-    # Every node at or below an untagged child of the search root whose
-    # inherited tags do not match. The subquery does not refer to the
-    # candidate, so the database builds this set once per query; when the
-    # inherited tags match, PostgreSQL skips it entirely.
-    hidden_child = aliased(orm.UntaggedNode)
-    below = aliased(orm.NodesClosure)
-    hidden = (
-        select(below.descendant)
-        .join(hidden_child, hidden_child.node_id == below.ancestor)
-        .where(hidden_child.parent_id == search_root_id)
-    )
-    if search_root_id != ROOT_NODE_ID:
-        # Untagged children of the catalog root inherit nothing, so they are
-        # always hidden; elsewhere only when their inherited tags do not match.
-        hidden = hidden.where(
-            not_(_inherited_tags_match(query, search_root_id, dialect_name))
+    if not hidden_children:
+        return no_blocker_on_path
+    # Candidates at or below a hidden untagged child of the search root.
+    below_hidden_child = aliased(orm.NodesClosure)
+    under_hidden_child = (
+        select(below_hidden_child.ancestor)
+        .where(
+            below_hidden_child.ancestor.in_(hidden_children),
+            below_hidden_child.descendant == orm.Node.id,
         )
-    return and_(no_blocker_on_path, orm.Node.id.not_in(hidden))
+        .exists()
+    )
+    return and_(no_blocker_on_path, not_(under_hidden_child))
 
 
 def _matching_tag_rows(query, dialect_name):
