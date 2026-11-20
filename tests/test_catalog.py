@@ -41,6 +41,7 @@ from tiled.catalog.adapter import (
     CatalogContainerAdapter,
     WouldDeleteData,
     _access_tags_predicate,
+    _deep_access_condition,
 )
 from tiled.catalog.explain import record_explanations
 from tiled.client import Context, from_context
@@ -1690,3 +1691,36 @@ def test_access_predicate_uses_in_list_on_sqlite():
         )
     )
     assert "IN (1, 2)" in sql
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_access_conditions_match_resolved_tag_ids(deep):
+    # Once the server has resolved the tag names, neither the node's own tags
+    # nor the inherited ones are matched by name.
+    query = AccessTagsFilter(["a"])
+    query.tag_ids = [3]
+    if deep:
+        condition = _deep_access_condition(query, 7, "postgresql")
+    else:
+        condition = _access_tags_predicate(query, catalog_orm.Node, 7, "postgresql")
+    sql = str(
+        condition.compile(
+            dialect=postgresql_dialect.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "access_tags.name" not in sql
+    # One match on tagged nodes (in deep search, the blockers) and one on the
+    # inherited tags.
+    assert sql.count("= ANY (ARRAY[3])") == 2
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_access_conditions_with_no_existing_tags_match_nothing(deep):
+    query = AccessTagsFilter(["undefined"])
+    query.tag_ids = []
+    if deep:
+        condition = _deep_access_condition(query, 7, "postgresql")
+    else:
+        condition = _access_tags_predicate(query, catalog_orm.Node, 7, "postgresql")
+    assert str(condition.compile(dialect=postgresql_dialect.dialect())) == "false"
