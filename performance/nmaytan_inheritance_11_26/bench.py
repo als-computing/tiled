@@ -456,6 +456,24 @@ def read_scenarios():
             "single-key lookup, not visible (404)",
         ),
         walk_scenario(
+            "walk.P_tagged",
+            "bl/P/p500000",
+            "single-key lookup among 1M children",
+            tags=USER_TAGS + ["bl_tag"],
+        ),
+        walk_scenario(
+            "walk.P_untagged",
+            "bl/P/p500005",
+            "single-key lookup among 1M children, inherited",
+            tags=USER_TAGS + ["bl_tag"],
+        ),
+        walk_scenario(
+            "walk.P_hidden",
+            "bl/P/p500008",
+            "single-key lookup among 1M children, not visible (404)",
+            tags=USER_TAGS + ["bl_tag"],
+        ),
+        walk_scenario(
             "walk.untagged_root_child",
             "U/u1",
             "untagged child of the root is not found (404)",
