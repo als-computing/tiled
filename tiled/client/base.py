@@ -305,7 +305,22 @@ class BaseClient:
         none, those of its nearest ancestor that has access tags. The catalog
         root's access tags are not inherited.
         """
-        effective_access_tags = self._item["attributes"].get("effective_access_tags")
+        attributes = self._item["attributes"]
+        if "effective_access_tags" not in attributes:
+            if attributes.get("access_tags"):
+                return ListView(attributes["access_tags"])
+            # Inherited tags are not known locally, e.g. for a node created or
+            # untagged through this client. This refreshes the whole node:
+            # servers older than effective_access_tags reject a request for
+            # only that field. Once they are no longer supported, this could
+            # fetch just the field instead.
+            attributes = self.refresh()._item["attributes"]
+            # Servers and adapters without inheritance do not send this field:
+            # the node's own tags are in effect.
+            attributes.setdefault(
+                "effective_access_tags", attributes.get("access_tags")
+            )
+        effective_access_tags = attributes["effective_access_tags"]
         if effective_access_tags is None:
             raise AttributeError("Node has no attribute 'effective_access_tags'")
         return ListView(effective_access_tags)
@@ -881,16 +896,7 @@ class BaseClient:
                 self._item["attributes"]["access_tags"] = patcher(
                     list(self.access_tags), access_tags_patch, content_type
                 )
-            self._update_effective_access_tags()
-
-    def _update_effective_access_tags(self):
-        # Own access tags are in effect if present; otherwise the inherited
-        # tags are not known locally until the node is fetched again.
-        attributes = self._item["attributes"]
-        if attributes.get("access_tags"):
-            attributes["effective_access_tags"] = list(attributes["access_tags"])
-        else:
-            attributes.pop("effective_access_tags", None)
+            self._item["attributes"].pop("effective_access_tags", None)
 
     def replace_metadata(
         self, metadata=None, specs=None, access_tags=None, drop_revision=False
@@ -960,7 +966,7 @@ class BaseClient:
                 self._item["attributes"]["access_tags"] = content["access_tags"]
             else:
                 self._item["attributes"]["access_tags"] = access_tags
-            self._update_effective_access_tags()
+            self._item["attributes"].pop("effective_access_tags", None)
 
     @property
     def metadata_revisions(self):

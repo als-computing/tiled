@@ -1187,7 +1187,10 @@ def test_admin_access_control(
         assert data in alice_client[top]
         alice_client[top][data]
         # remove public access, in fact remove all tags and ignore missing scopes
-        admin_client[top][data].replace_metadata(access_tags=[])
+        node = admin_client[top][data]
+        node.replace_metadata(access_tags=[])
+        assert list(node.access_tags) == []
+        assert list(node.effective_access_tags) == ["alice_tag"]
         assert data in admin_client[top]
         admin_client[top][data]
         # the untagged node inherits alice_tag from its parent
@@ -1408,6 +1411,7 @@ def test_new_node_without_tags_inherits(access_control_test_context_factory):
     container = alice_client["foo"].create_container(key="new_untagged")
     container.write_array(arr, key="new_untagged_leaf")
     assert not list(container.access_tags)
+    assert list(container.effective_access_tags) == ["alice_tag"]
 
     # foo is tagged alice_tag: alice may write, chris may read.
     alice_client["foo/new_untagged/new_untagged_leaf"].replace_metadata(
@@ -1473,6 +1477,20 @@ def test_inherited_access_control(access_control_test_context_factory):
     # sue has none of these tags, so sees nothing, by any route.
     with pytest.raises(KeyError):
         sue_client["foo/inh_parent/inh_leaf"]
+
+    # Own and effective tags, for a single node and for a listing.
+    leaf = alice_client["foo/inh_parent/inh_leaf"]
+    assert list(leaf.access_tags) == []
+    assert list(leaf.effective_access_tags) == ["alice_tag"]
+    assert {
+        key: list(node.effective_access_tags)
+        for key, node in alice_client["foo/inh_parent"].items()
+    } == {"inh_leaf": ["alice_tag"], "inh_chris": ["chris_tag"]}
+
+    # Re-tagging an ancestor changes what its untagged descendants inherit.
+    admin_client["foo/inh_parent"].replace_metadata(access_tags=["chris_tag"])
+    leaf = alice_client["foo/inh_parent/inh_leaf"]
+    assert list(leaf.effective_access_tags) == ["chris_tag"]
 
 
 def test_container_access_control(access_control_test_context_factory):
@@ -2026,10 +2044,12 @@ def test_legacy_access_blob_in_responses(access_control_test_context_factory):
     attributes = legacy["data"]["attributes"]
     assert attributes["access_blob"] == {"tags": ["alice_tag"]}
     assert "access_tags" not in attributes
+    assert "effective_access_tags" not in attributes
 
     modern = alice_client.context.http_client.get(url, headers=MODERN_UA).json()
     attributes = modern["data"]["attributes"]
     assert attributes["access_tags"] == ["alice_tag"]
+    assert attributes["effective_access_tags"] == ["alice_tag"]
     assert "access_blob" not in attributes
 
 
