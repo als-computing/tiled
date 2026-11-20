@@ -22,7 +22,7 @@ SRC=$(cd "${2:?usage: build.sh DBNAME TILED_SRC [DATASET...]}" && pwd)
 shift 2
 DATASETS=("$@")
 if [ ${#DATASETS[@]} -eq 0 ]; then
-    DATASETS=(base untagged_top inheritance unique_keys deep_chain many_tags runs writes)
+    DATASETS=(base untagged_top inheritance unique_keys deep_chain many_tags runs grid hidden_block writes)
 fi
 
 "$HERE/postgres.sh" psql -q -c "DROP DATABASE IF EXISTS $DBNAME" \
@@ -41,6 +41,7 @@ done
 # databases of the versions being compared.
 "$HERE/postgres.sh" psql -q "$DBNAME" \
     -c "SET default_statistics_target = 1000" -c "VACUUM ANALYZE"
+"$HERE/check.sh" "$DBNAME"
 "$HERE/postgres.sh" psql -q "$DBNAME" -At -F ' ' -c "
     SELECT 'nodes', count(*) FROM nodes
     UNION ALL SELECT 'closure rows', count(*) FROM nodes_closure

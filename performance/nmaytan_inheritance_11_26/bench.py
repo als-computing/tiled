@@ -25,6 +25,7 @@ import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import asyncpg
@@ -253,13 +254,24 @@ def deep_ops(path):
     }
 
 
-def container_scenarios(label, path, ops, covers, tags=None, admin=False, deep=False):
+def container_scenarios(
+    label,
+    path,
+    ops,
+    covers,
+    tags=None,
+    admin=False,
+    deep=False,
+    setup=None,
+    teardown=None,
+):
     """Scenarios named `<label>.<op>` for the container at `path`.
 
     The container is looked up without filtering and then filtered, as
     `get_entry` filters the last segment of a path: that way containers the
     user cannot reach (inherit_false/) can still be listed. Reaching a node is
-    measured separately by the walk scenarios.
+    measured separately by the walk scenarios. `setup` and `teardown` are
+    passed on to every scenario.
     """
     available = deep_ops(path) if deep else listing_ops(path)
     scenarios = []
@@ -276,6 +288,8 @@ def container_scenarios(label, path, ops, covers, tags=None, admin=False, deep=F
                 "read",
                 run,
                 covers,
+                setup=setup,
+                teardown=teardown,
                 tags=tags or list(USER_TAGS),
                 admin=admin,
             )
@@ -319,6 +333,35 @@ DEEP_OPS = [
     "deep_sort_metadata",
 ]
 CHAIN_BOTTOM = ["c"] * 20
+GRID_VISIBLE = ["1pct", "50pct", "100pct", "inherit"]
+GRID_DESCENDANTS = ["tagged", "mixed", "inheriting"]
+
+
+async def _page_before_x(name, b):
+    "The deep-search page from `name` that starts after n999, just before X."
+    if ("before_x", name) not in b.cursors:
+        b.cursors["before_x", name] = await b.conn.fetchval(
+            "SELECT n.id FROM nodes t "
+            "JOIN nodes l2 ON l2.parent = t.id AND l2.key = 'l2' "
+            "JOIN nodes l3 ON l3.parent = l2.id AND l3.key = 'l3' "
+            "JOIN nodes n ON n.parent = l3.id AND n.key = 'n999' "
+            "WHERE t.parent = 0 AND t.key = $1",
+            name,
+        )
+    tree = await restrict(await b.root.lookup_adapter([name]), StubPolicy(USER_TAGS))
+    return (await tree.search_deep().keys_page(b.cursors["before_x", name], PAGE))[0]
+
+
+async def _add_root_untagged(n, b):
+    await b.conn.execute(
+        "INSERT INTO nodes(parent, key, structure_family, metadata, specs) "
+        "SELECT 0, 'ru' || g, 'container', '{}', '[]' FROM generate_series(1, $1) g",
+        n,
+    )
+
+
+async def _remove_root_untagged(b):
+    await b.conn.execute("DELETE FROM nodes WHERE parent = 0 AND key ~ '^ru[0-9]+$'")
 
 
 def read_scenarios():
@@ -348,14 +391,14 @@ def read_scenarios():
         s += container_scenarios(
             name,
             [name],
-            ["count", "keys_page", "response", "metadata_search"],
+            FLAT_OPS,
             "tag matching with many user tags and several tags per node",
             tags=MANY_TAGS,
         )
         s += container_scenarios(
             name,
             [name],
-            ["deep_count", "deep_keys_page"],
+            DEEP_OPS,
             "deep-search blockers with many tags",
             tags=MANY_TAGS,
             deep=True,
@@ -366,13 +409,13 @@ def read_scenarios():
         s += container_scenarios(
             f"{name}_bottom",
             [name] + CHAIN_BOTTOM,
-            ["count", "keys_page", "response"],
+            FLAT_OPS,
             "nearest-tagged-ancestor lookup 21 levels up",
         )
         s += container_scenarios(
             name,
             [name],
-            ["deep_count", "deep_keys_page", "deep_response"],
+            DEEP_OPS,
             "deep search through a long untagged chain",
             deep=True,
         )
@@ -382,7 +425,7 @@ def read_scenarios():
     s += container_scenarios(
         "root",
         [],
-        ["deep_count", "deep_keys_page", "deep_keys_page_mid"],
+        DEEP_OPS,
         "deep search from /: untagged children of the root hidden",
         tags=USER_TAGS + ["bl_tag"],
         deep=True,
@@ -408,7 +451,7 @@ def read_scenarios():
     s += container_scenarios(
         "bl",
         ["bl"],
-        ["deep_count", "deep_keys_page", "deep_keys_page_mid"],
+        DEEP_OPS,
         "deep search from a container whose tags do not match",
         deep=True,
     )
@@ -435,7 +478,7 @@ def read_scenarios():
     s += container_scenarios(
         "raw",
         ["tla", "raw"],
-        ["count", "keys_page", "keys_page_mid", "metadata_search"],
+        FLAT_OPS,
         "a wide container, few children visible",
     )
     for name, tla in [("raw", "tla"), ("raw_tagged", "tla_tagged")]:
@@ -453,6 +496,78 @@ def read_scenarios():
                 "an array in a run, two levels below the top",
             )
         )
+    # One hidden subtree of 500,500 nodes three levels down, between visible
+    # siblings (hidden_block.sql), and its tagged twin.
+    for name in ["block", "block_tagged"]:
+        s += container_scenarios(
+            name,
+            [name],
+            DEEP_OPS,
+            "deep search past one large hidden subtree",
+            deep=True,
+        )
+        s.append(
+            Scenario(
+                f"{name}.deep_keys_page_before_X",
+                "read",
+                partial(_page_before_x, name),
+                "a deep-search page that must skip the whole hidden subtree",
+            )
+        )
+        s += container_scenarios(
+            f"{name}_l3",
+            [name, "l2", "l3"],
+            ["count", "keys_page", "keys_page_mid"],
+            "listing a container that holds a large hidden subtree",
+        )
+        s.append(
+            walk_scenario(
+                f"walk.{name}_w0",
+                f"{name}/l2/l3/w0",
+                "a node three levels down, beside a large hidden subtree",
+            )
+        )
+    # Untagged children of the catalog root are hidden, and deep search from
+    # the root looks up their ids (up to MAX_HIDDEN_UNTAGGED_CHILDREN, 1000)
+    # before the search. U is one already; these add more around the limit.
+    for n in [10, 999, 1000]:
+        s += container_scenarios(
+            f"root+{n}_untagged",
+            [],
+            ["deep_count", "deep_keys_page", "deep_keys_page_mid"],
+            f"deep search from / with {n + 1} hidden untagged children of the root",
+            tags=USER_TAGS + ["bl_tag"],
+            deep=True,
+            setup=partial(_add_root_untagged, n),
+            teardown=_remove_root_untagged,
+        )
+    # Every combination of shape, visible fraction and descendant tagging
+    # (grid.sql). Listing a tree depends only on how its runs are tagged, so
+    # only one tree per run tagging is listed.
+    cells = [
+        (shape, visible, descendants, "")
+        for shape in ["wide", "deep"]
+        for visible in GRID_VISIBLE
+        for descendants in GRID_DESCENDANTS
+        if not (visible == "inherit" and descendants == "tagged")
+    ]
+    cells += [
+        ("wide", "1pct", descendants, "_uroot") for descendants in GRID_DESCENDANTS
+    ]
+    for shape, visible, descendants, suffix in cells:
+        cell = f"{shape}_{visible}_{descendants}{suffix}"
+        covers = f"{shape} catalog, runs {visible}, descendants {descendants}"
+        if suffix:
+            covers += ", searched from an untagged container"
+        if descendants == "tagged" or (
+            visible == "inherit" and descendants == "inheriting"
+        ):
+            s += container_scenarios(f"grid.{cell}", ["grid", cell], FLAT_OPS, covers)
+        s += container_scenarios(
+            f"grid.{cell}", ["grid", cell], DEEP_OPS, covers, deep=True
+        )
+        below = "/n0" * (3 if shape == "wide" else 4)
+        s.append(walk_scenario(f"walk.grid_{cell}", f"grid/{cell}{below}", covers))
     # Path walks: what every request pays to reach its node.
     s += [
         walk_scenario(
