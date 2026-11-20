@@ -707,12 +707,12 @@ class Bench:
         self.engine = self.root.context.engine
         timeout_ms = str(self.args.timeout * 1000)
 
-        def set_timeout(dbapi_connection, record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute(f"SET statement_timeout = {timeout_ms}")
-            cursor.close()
+        def set_timeout(dialect, record, cargs, cparams):
+            # A connection parameter rather than a SET, which a rollback of the
+            # connection's first transaction would undo.
+            cparams.setdefault("server_settings", {})["statement_timeout"] = timeout_ms
 
-        event.listen(self.engine.sync_engine, "connect", set_timeout)
+        event.listen(self.engine.sync_engine, "do_connect", set_timeout)
         # Connections made during startup lack the timeout.
         await self.engine.dispose()
         self.recorder = Recorder(self.engine)
