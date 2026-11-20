@@ -549,6 +549,12 @@ class AccessTagsFilter:
     tag_ids: list[int] | None = field(
         default=None, compare=False, metadata={"internal": True}
     )
+    # Server-internal, like 'tag_ids': what the catalog resolves, along with
+    # 'tag_ids', about the untagged children of the container the filter is
+    # applied to. See 'tiled.catalog.adapter.UntaggedChildren'.
+    untagged_children: Any = field(
+        default=None, compare=False, metadata={"internal": True}
+    )
 
     def __post_init__(self):
         if isinstance(self.tags, str):

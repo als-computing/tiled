@@ -196,8 +196,8 @@ async def filter_for_access(
             else:
                 for query in queries:
                     if isinstance(query, AccessTagsFilter) and hasattr(
-                        entry, "resolve_access_tag_ids"
+                        entry, "resolve_access_tags_filter"
                     ):
-                        query.tag_ids = await entry.resolve_access_tag_ids(query.tags)
+                        query = await entry.resolve_access_tags_filter(query)
                     entry = entry.search(query)
     return entry

@@ -134,7 +134,6 @@ from .core import (
     initialize_catalog_database,
     initialize_database,
     register_tag_rows,
-    resolve_access_tag_ids,
 )
 from .explain import ExplainAsyncSession
 from .utils import compute_structure_id
@@ -586,9 +585,8 @@ class CatalogNodeAdapter:
         return f"<{type(self).__name__} {self.key}>"
 
     async def __aiter__(self):
+        statement = self._scoped(select(orm.Node.key, orm.Node.id))
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            statement = self._scoped(select(orm.Node.key, orm.Node.id), hidden_children)
             rows = (await db.execute(statement.order_by(*self.order_by_clauses))).all()
         if self.deep:
             relative_keys = await self.relative_keys_for_ids([row[1] for row in rows])
@@ -689,24 +687,87 @@ class CatalogNodeAdapter:
             statement = statement.filter(condition)
         return statement
 
-    async def resolve_access_tag_ids(self, names):
-        """Resolve access-tag 'names' to their 'access_tags.id' values.
+    async def resolve_access_tags_filter(self, query):
+        """Resolve what the access conditions of `query` need to know here.
 
-        Returns a list of integer ids for the names that exist (order is not
-        significant; missing names are simply omitted). Used to build ACL
-        filters that reference 'tag_id' literals instead of joining
-        'access_tags' by name -- see 'access_tags_filter'.
+        Returns a copy of `query` with `tag_ids`, the ids of its tags that
+        exist (see `_tag_match`), and `untagged_children`, an
+        `UntaggedChildren` for this node. Both are found in one statement,
+        so the conditions can be built for the case at hand instead of
+        testing it in SQL.
         """
+        if not query.tags:
+            return dataclasses.replace(query, tag_ids=[])
+        dialect_name = self.context.engine.dialect.name
+        parts = [
+            select(literal("tag"), orm.AccessTag.id).where(
+                orm.AccessTag.name.in_(query.tags)
+            )
+        ]
+        if self.node.id == ROOT_NODE_ID:
+            # Untagged children of the catalog root inherit nothing, so they
+            # are always hidden.
+            hidden = (
+                select(orm.UntaggedNode.node_id)
+                .where(orm.UntaggedNode.parent_id == ROOT_NODE_ID)
+                .limit(MAX_HIDDEN_UNTAGGED_CHILDREN + 1)
+                .subquery()
+            )
+            parts.append(select(literal("hidden"), hidden.c.node_id))
+        else:
+            # Elsewhere they are visible if their inherited tags match.
+            parts.append(
+                select(literal("inherited tags match"), literal(0)).where(
+                    _inherited_tags_match(query, self.node.id, dialect_name)
+                )
+            )
+            # Whether there are any. min() rather than EXISTS: PostgreSQL
+            # reads it from the first entry of the index on (parent_id,
+            # node_id), where for an EXISTS it may scan the table.
+            first_untagged_child = (
+                select(func.min(orm.UntaggedNode.node_id))
+                .where(orm.UntaggedNode.parent_id == self.node.id)
+                .scalar_subquery()
+            )
+            parts.append(
+                select(literal("untagged children"), literal(0)).where(
+                    first_untagged_child.is_not(None)
+                )
+            )
+        statement = union_all(*parts)
         async with self.context.session() as db:
-            return await resolve_access_tag_ids(db, names)
+            rows = (await db.execute(statement)).all()
+        ids = collections.defaultdict(list)
+        for kind, id_ in rows:
+            ids[kind].append(id_)
+        if self.node.id == ROOT_NODE_ID:
+            visible = False
+            hidden = ids["hidden"]
+            if len(hidden) > MAX_HIDDEN_UNTAGGED_CHILDREN:
+                hidden = None
+        elif not ids["untagged children"]:
+            visible, hidden = False, []
+        elif ids["inherited tags match"]:
+            visible, hidden = True, []
+        else:
+            # Rare: a user reaches a container through matching tags, so its
+            # untagged children inherit matching tags. The ids are not looked
+            # up; the access conditions find these children in SQL.
+            visible, hidden = False, None
+        return dataclasses.replace(
+            query,
+            tag_ids=ids["tag"],
+            untagged_children=UntaggedChildren(
+                parent_id=self.node.id, visible=visible, hidden=hidden
+            ),
+        )
 
     async def exact_len(self):
         "Get the exact number of child (or, in deep mode, descendant) nodes."
+        statement = self._scope_statement(select(func.count()).select_from(orm.Node))
+        statement = self.apply_conditions(statement)
+
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            statement = self._scoped(
-                select(func.count()).select_from(orm.Node), hidden_children
-            )
             return (await db.execute(statement)).scalar_one()
 
     async def approx_len(self) -> int | None:
@@ -763,13 +824,13 @@ class CatalogNodeAdapter:
         containers. If result is <= `threshold`, it is exact.
         """
 
+        limited = self._scope_statement(select(literal(1)).select_from(orm.Node)).limit(
+            threshold + 1
+        )
+        limited = self.apply_conditions(limited).cte("limited")
+        statement = select(func.count()).select_from(limited)
+
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            limited = self._scope_statement(
-                select(literal(1)).select_from(orm.Node), hidden_children
-            ).limit(threshold + 1)
-            limited = self.apply_conditions(limited).cte("limited")
-            statement = select(func.count()).select_from(limited)
             return (await db.execute(statement)).scalar_one()
 
     async def lookup_adapter(self, segments: list[str]):
@@ -1067,36 +1128,7 @@ class CatalogNodeAdapter:
             )
         return self.new_variation(deep=True, max_depth=max_depth)
 
-    async def _hidden_untagged_children(self, db):
-        """In deep mode, this node's untagged children hidden by each access filter.
-
-        Returns one list of node ids per entry of `self.access_filters`, for
-        `_scope_statement`, or None when not in deep mode. The untagged
-        children inherit this node's tags, which `_deep_access_condition` does
-        not see on the paths it checks. Untagged children of the catalog root
-        inherit nothing, so they are always hidden; elsewhere only when their
-        inherited tags do not match, which is rare: a user reaches this node
-        through matching tags.
-
-        Run separately, before the statement it is for, so that the database
-        plans that statement knowing which nodes they are.
-        """
-        if not self.deep:
-            return None
-        dialect_name = self.context.engine.dialect.name
-        hidden_children = []
-        for query, _ in self.access_filters:
-            statement = select(orm.UntaggedNode.node_id).where(
-                orm.UntaggedNode.parent_id == self.node.id
-            )
-            if self.node.id != ROOT_NODE_ID:
-                statement = statement.where(
-                    not_(_inherited_tags_match(query, self.node.id, dialect_name))
-                )
-            hidden_children.append(list((await db.execute(statement)).scalars()))
-        return hidden_children
-
-    def _scope_statement(self, statement, hidden_children):
+    def _scope_statement(self, statement):
         """Restrict a `SELECT ... FROM nodes` statement to the nodes in scope.
 
         By default (self.deep is False), scope is this node's direct
@@ -1105,8 +1137,7 @@ class CatalogNodeAdapter:
         When self.deep is True, scope is ALL descendants of this node
         (any depth), found via the `nodes_closure` table, which is kept up
         to date by DB triggers (see orm.py). `self.max_depth`, if set, bounds
-        how many levels below this node to include. `hidden_children` is
-        the result of `_hidden_untagged_children`.
+        how many levels below this node to include.
         """
         if not self.deep:
             return statement.filter(orm.Node.parent == self.node.id)
@@ -1116,11 +1147,9 @@ class CatalogNodeAdapter:
         if self.max_depth is not None:
             statement = statement.where(orm.NodesClosure.depth <= self.max_depth)
         dialect_name = self.context.engine.dialect.name
-        for (query, _), hidden in zip(
-            self.access_filters, hidden_children, strict=True
-        ):
+        for query, _ in self.access_filters:
             statement = statement.where(
-                _deep_access_condition(query, self.node.id, hidden, dialect_name)
+                _deep_access_condition(query, self.node.id, dialect_name)
             )
         return statement
 
@@ -1163,9 +1192,9 @@ class CatalogNodeAdapter:
     def sort(self, sorting):
         return self.new_variation(sorting=sorting)
 
-    def _scoped(self, statement, hidden_children):
+    def _scoped(self, statement):
         "Restrict a `SELECT ... FROM nodes` to the nodes in scope that match the conditions."
-        return self.apply_conditions(self._scope_statement(statement, hidden_children))
+        return self.apply_conditions(self._scope_statement(statement))
 
     async def get_distinct(self, metadata, structure_families, specs, counts):
         if self.node.data_sources:
@@ -1175,7 +1204,6 @@ class CatalogNodeAdapter:
         data = {}
 
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
             if metadata:
                 data["metadata"] = {}
                 for key in metadata:
@@ -1186,9 +1214,7 @@ class CatalogNodeAdapter:
                         columns = (clause, func.count(clause))
                     else:
                         columns = (clause,)
-                    statement = self._scoped(
-                        select(*columns), hidden_children
-                    ).group_by(clause)
+                    statement = self._scoped(select(*columns)).group_by(clause)
                     results = (await db.execute(statement)).all()
                     data["metadata"][key] = format_distinct_result(results, counts)
 
@@ -1200,7 +1226,7 @@ class CatalogNodeAdapter:
                     )
                 else:
                     columns = (orm.Node.structure_family,)
-                statement = self._scoped(select(*columns), hidden_children).group_by(
+                statement = self._scoped(select(*columns)).group_by(
                     orm.Node.structure_family
                 )
                 results = (await db.execute(statement)).all()
@@ -1212,9 +1238,7 @@ class CatalogNodeAdapter:
                     columns = (orm.Node.specs, func.count(orm.Node.specs))
                 else:
                     columns = (orm.Node.specs,)
-                statement = self._scoped(select(*columns), hidden_children).group_by(
-                    orm.Node.specs
-                )
+                statement = self._scoped(select(*columns)).group_by(orm.Node.specs)
                 results = (await db.execute(statement)).all()
 
                 data["specs"] = format_distinct_result(results, counts)
@@ -2134,12 +2158,11 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return [], None
 
+        statement = select(orm.Node.key, orm.Node.id)
+        statement = self._scope_statement(statement)
+        statement = self._apply_cursor_pagination(statement, cursor, limit)
+
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            statement = self._scope_statement(
-                select(orm.Node.key, orm.Node.id), hidden_children
-            )
-            statement = self._apply_cursor_pagination(statement, cursor, limit)
             rows = (await db.execute(statement)).all()
 
         next_cursor = None
@@ -2168,18 +2191,15 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return []
 
+        statement = select(orm.Node.key, orm.Node.id)
+        statement = self._scope_statement(statement)
+        if offset:
+            statement = statement.offset(offset)
+        statement = self.apply_conditions(statement).order_by(*self.order_by_clauses)
+        if limit is not None:
+            statement = statement.limit(limit)
+
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            statement = self._scope_statement(
-                select(orm.Node.key, orm.Node.id), hidden_children
-            )
-            if offset:
-                statement = statement.offset(offset)
-            statement = self.apply_conditions(statement).order_by(
-                *self.order_by_clauses
-            )
-            if limit is not None:
-                statement = statement.limit(limit)
             rows = (await db.execute(statement)).all()
 
         if self.deep:
@@ -2223,10 +2243,10 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return [], None
 
+        statement = self._scope_statement(select(orm.Node))
+        statement = self._apply_cursor_pagination(statement, cursor, limit)
+
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            statement = self._scope_statement(select(orm.Node), hidden_children)
-            statement = self._apply_cursor_pagination(statement, cursor, limit)
             nodes = (await db.execute(statement)).scalars().all()
 
         next_cursor = None
@@ -2266,16 +2286,14 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
         if limit == 0:
             return []
 
+        statement = self._scope_statement(select(orm.Node))
+        if offset:
+            statement = statement.offset(offset)
+        statement = self.apply_conditions(statement).order_by(*self.order_by_clauses)
+        if limit is not None:
+            statement = statement.limit(limit)
+
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            statement = self._scope_statement(select(orm.Node), hidden_children)
-            if offset:
-                statement = statement.offset(offset)
-            statement = self.apply_conditions(statement).order_by(
-                *self.order_by_clauses
-            )
-            if limit is not None:
-                statement = statement.limit(limit)
             nodes = (await db.execute(statement)).scalars().all()
 
         relative_keys = (
@@ -2309,11 +2327,11 @@ class CatalogContainerAdapter(CatalogNodeAdapter):
             # so offset - 1 is the correct "previous item" cursor here.
             return offset - 1
 
+        statement = self._scope_statement(select(orm.Node.id))
+        statement = self.apply_conditions(statement).order_by(*self.order_by_clauses)
+        statement = statement.offset(offset - 1).limit(1)
+
         async with self.context.session() as db:
-            hidden_children = await self._hidden_untagged_children(db)
-            statement = self._scoped(select(orm.Node.id), hidden_children)
-            statement = statement.order_by(*self.order_by_clauses)
-            statement = statement.offset(offset - 1).limit(1)
             row = (await db.execute(statement)).first()
 
         return row[0] if row is not None else None
@@ -2953,6 +2971,47 @@ def _nearest_tagged_ancestor_tags_of(node_ids):
     )
 
 
+# Beyond this many, the ids of hidden untagged children are not passed to the
+# database (see `UntaggedChildren.hidden`), to stay well within the drivers'
+# limits on the number of parameters in a statement.
+MAX_HIDDEN_UNTAGGED_CHILDREN = 1000
+
+
+@dataclasses.dataclass(frozen=True)
+class UntaggedChildren:
+    """The untagged children of one container, as one `AccessTagsFilter` sees them.
+
+    Resolved with the filter's tag ids by
+    `CatalogNodeAdapter.resolve_access_tags_filter`, and stored on the filter
+    as `untagged_children`. When a filter does not have them for the
+    container at hand, as when it is applied directly rather than through
+    the server, the access conditions find them in SQL instead.
+    """
+
+    # The container.
+    parent_id: int
+    # Whether it has untagged children that pass the filter: those inherit
+    # matching tags.
+    visible: bool
+    # The ids of its untagged children that do not pass, or None if not looked
+    # up: there are more than MAX_HIDDEN_UNTAGGED_CHILDREN, or the container
+    # is not the catalog root (see `resolve_access_tags_filter`).
+    hidden: list[int] | None
+
+    @property
+    def none_hidden(self):
+        "Whether every untagged child passes; there may be none."
+        return self.visible or self.hidden == []
+
+
+def _resolved_untagged_children(query, parent_id):
+    "The `UntaggedChildren` of `parent_id` resolved on `query`, or None."
+    untagged_children = query.untagged_children
+    if untagged_children is None or untagged_children.parent_id != parent_id:
+        return None
+    return untagged_children
+
+
 def _inherited_tags_match(query, node_id, dialect_name):
     """SQL condition: the tags that untagged children of `node_id` inherit
     include at least one of `query.tags`.
@@ -2998,10 +3057,14 @@ def _access_tags_predicate(query, node, parent_id, dialect_name):
     tagged = _matching_tag_rows(query, dialect_name).where(
         orm.NodeAccessTagAssociation.parent_id == parent_id
     )
-    if parent_id == ROOT_NODE_ID:
-        # Untagged children of the catalog root inherit nothing, so only
-        # tagged children can pass. A bare EXISTS, which PostgreSQL plans as
-        # a semi-join (and which is much faster than IN in SQLite).
+    untagged_children = _resolved_untagged_children(query, parent_id)
+    if parent_id == ROOT_NODE_ID or (
+        untagged_children is not None and not untagged_children.visible
+    ):
+        # Only tagged children can pass: untagged children of the catalog
+        # root inherit nothing, and here, none are known to pass. A bare
+        # EXISTS, which PostgreSQL plans as a semi-join (and which is much
+        # faster than IN in SQLite).
         return tagged.where(orm.NodeAccessTagAssociation.node_id == node.id).exists()
     # List the passing children outright, those with a query tag and the
     # untagged ones, and test membership. PostgreSQL plans this as one
@@ -3011,9 +3074,10 @@ def _access_tags_predicate(query, node, parent_id, dialect_name):
     # UNION rather than UNION ALL: PostgreSQL misestimates the row count of a
     # UNION ALL and then probes the children one at a time.
     untagged = select(orm.UntaggedNode.node_id).where(
-        orm.UntaggedNode.parent_id == parent_id,
-        _inherited_tags_match(query, parent_id, dialect_name),
+        orm.UntaggedNode.parent_id == parent_id
     )
+    if untagged_children is None:
+        untagged = untagged.where(_inherited_tags_match(query, parent_id, dialect_name))
     return node.id.in_(union(tagged, untagged))
 
 
@@ -3036,9 +3100,11 @@ def _single_child_access_condition(query, node, parent_id, dialect_name):
         # Untagged children of the catalog root inherit nothing.
         return tagged.exists()
     untagged = select(orm.UntaggedNode.node_id).where(
-        orm.UntaggedNode.node_id == node.id,
-        _inherited_tags_match(query, parent_id, dialect_name),
+        orm.UntaggedNode.node_id == node.id
     )
+    untagged_children = _resolved_untagged_children(query, parent_id)
+    if untagged_children is None or not untagged_children.none_hidden:
+        untagged = untagged.where(_inherited_tags_match(query, parent_id, dialect_name))
     # One EXISTS over both cases rather than an OR of two. PostgreSQL may
     # evaluate an EXISTS inside an OR by hashing every row it could match,
     # here every assignment of the query's tags in the catalog; it cannot do
@@ -3046,7 +3112,7 @@ def _single_child_access_condition(query, node, parent_id, dialect_name):
     return union_all(tagged, untagged).exists()
 
 
-def _deep_access_condition(query, search_root_id, hidden_children, dialect_name):
+def _deep_access_condition(query, search_root_id, dialect_name):
     """SQL condition on a deep-search candidate: it may be seen under `query`.
 
     The candidate is `orm.Node`, joined to `orm.NodesClosure` from the search
@@ -3062,8 +3128,8 @@ def _deep_access_condition(query, search_root_id, hidden_children, dialect_name)
     - a node on its path below the search root, itself included, is tagged
       with none of the query's tags; or
     - it is, or is below, an untagged child of the search root, and the tags
-      that child inherits do not match. `hidden_children` lists those
-      children; see `CatalogNodeAdapter._hidden_untagged_children`.
+      that child inherits do not match. When `query` has resolved those
+      children (see `UntaggedChildren`), they are excluded by id.
     """
     if not query.tags or query.tag_ids == []:
         # Nothing can match an empty list, or tags none of which exist.
@@ -3097,19 +3163,40 @@ def _deep_access_condition(query, search_root_id, hidden_children, dialect_name)
         )
         .exists()
     )
-    if not hidden_children:
-        return no_blocker_on_path
-    # Candidates at or below a hidden untagged child of the search root.
-    below_hidden_child = aliased(orm.NodesClosure)
-    under_hidden_child = (
-        select(below_hidden_child.ancestor)
-        .where(
-            below_hidden_child.ancestor.in_(hidden_children),
-            below_hidden_child.descendant == orm.Node.id,
+    untagged_children = _resolved_untagged_children(query, search_root_id)
+    if untagged_children is not None and untagged_children.hidden is not None:
+        if not untagged_children.hidden:
+            return no_blocker_on_path
+        # Knowing which children they are lets PostgreSQL walk the closure
+        # rows below each in order.
+        below_hidden_child = aliased(orm.NodesClosure)
+        under_hidden_child = (
+            select(below_hidden_child.ancestor)
+            .where(
+                below_hidden_child.ancestor.in_(untagged_children.hidden),
+                below_hidden_child.descendant == orm.Node.id,
+            )
+            .exists()
         )
-        .exists()
+        return and_(no_blocker_on_path, not_(under_hidden_child))
+    # Every node at or below an untagged child of the search root whose
+    # inherited tags do not match. The subquery does not refer to the
+    # candidate, so the database builds this set once per query; when the
+    # inherited tags match, PostgreSQL skips it entirely.
+    hidden_child = aliased(orm.UntaggedNode)
+    below = aliased(orm.NodesClosure)
+    hidden = (
+        select(below.descendant)
+        .join(hidden_child, hidden_child.node_id == below.ancestor)
+        .where(hidden_child.parent_id == search_root_id)
     )
-    return and_(no_blocker_on_path, not_(under_hidden_child))
+    if search_root_id != ROOT_NODE_ID:
+        # Untagged children of the catalog root inherit nothing, so they are
+        # always hidden; elsewhere only when their inherited tags do not match.
+        hidden = hidden.where(
+            not_(_inherited_tags_match(query, search_root_id, dialect_name))
+        )
+    return and_(no_blocker_on_path, orm.Node.id.not_in(hidden))
 
 
 def _matching_tag_rows(query, dialect_name):
@@ -3132,10 +3219,11 @@ def _tag_match(query, association, dialect_name):
         return association.tag_id.in_(
             select(orm.AccessTag.id).where(orm.AccessTag.name.in_(query.tags))
         )
-    # The server resolves the tag names to their `access_tags.id` values
-    # (see `resolve_access_tag_ids`). Filtering on literal `tag_id` values,
-    # rather than joining `access_tags` by name, lets PostgreSQL apply the
-    # (parent_id, tag_id) extended statistics and estimate correctly.
+    # The server resolves the tag names to their `access_tags.id` values (see
+    # `CatalogNodeAdapter.resolve_access_tags_filter`). Filtering on literal
+    # `tag_id` values, rather than joining `access_tags` by name, lets
+    # PostgreSQL apply the (parent_id, tag_id) extended statistics and
+    # estimate correctly.
     # Deduplicate and sort so the parameter value is stable across requests.
     tag_ids = sorted(set(query.tag_ids))
     if dialect_name == "postgresql":
