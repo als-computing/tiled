@@ -429,6 +429,30 @@ def read_scenarios():
             "deep-search blockers in a mixed tree",
             deep=True,
         )
+    # A wide catalog of runs, 1% of them visible (runs.sql). Listing raw is
+    # the same in both trees; raw_tagged is the fair comparison for deep
+    # search and walks.
+    s += container_scenarios(
+        "raw",
+        ["tla", "raw"],
+        ["count", "keys_page", "keys_page_mid", "metadata_search"],
+        "a wide container, few children visible",
+    )
+    for name, tla in [("raw", "tla"), ("raw_tagged", "tla_tagged")]:
+        s += container_scenarios(
+            name,
+            [tla, "raw"],
+            DEEP_OPS,
+            "deep search, most subtrees hidden",
+            deep=True,
+        )
+        s.append(
+            walk_scenario(
+                f"walk.{name}_array",
+                f"{tla}/raw/n0/n0/n0",
+                "an array in a run, two levels below the top",
+            )
+        )
     # Path walks: what every request pays to reach its node.
     s += [
         walk_scenario(

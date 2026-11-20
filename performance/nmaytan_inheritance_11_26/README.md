@@ -35,7 +35,7 @@ python3 compare.py results/base.json results/new.json
 
 Each database must be built by the checkout that is measured against it,
 because each version creates its own schema, indexes and triggers. A build
-takes about 10 minutes, and a full run about 15 minutes.
+takes about 13 minutes, and a full run about 20 minutes.
 
 ## How it measures
 
@@ -96,6 +96,7 @@ the version without inheritance.
 | `unique_keys` | `keyed/`, 200,000 children keyed `k<md5(i)>`: a third untagged, the rest grp_* | Single-key lookups with realistic keys. The other datasets repeat keys `n0`, `n1`, … in every container, which skews PostgreSQL's estimates |
 | `deep_chain` | `deepchain/`: 20 nested untagged containers with 10,000 children at the bottom, plus a tagged twin | The nearest tagged ancestor is 21 levels up: affects walks, listings and effective tags |
 | `many_tags` | `many/`, `many_tagged/`: 200,000 children with 3 of 200 tags each; one in five untagged in `many/` | Many tags per user (the scenarios grant 55) and per node |
+| `runs` | `tla/raw/` (bench_user) with 50,000 runs tagged grp_*, each with 2 streams of 4 arrays, untagged; `tla_tagged/raw/`, its tagged twin | A wide catalog where a user sees 1% of the runs, spread through the id order: deep search must reject the subtrees of the other 99% |
 | `writes` | `writes/` (empty), `writes_big/` with 100,000 untagged children | Targets for the write scenarios, which restore them after every run |
 
 The children of P, Q and U are bare `array` rows with no data source, which
