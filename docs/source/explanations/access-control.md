@@ -114,12 +114,27 @@ Inheritance applies everywhere access is checked: listing a container's
 contents, search, deep search, and working out which scopes a user has on a
 node.
 
+To see the tags that govern a node, inherited or its own, use the client's
+`effective_access_tags` property; `access_tags` shows only the node's own
+tags.
+
+```python
+node = client["experiment"]["scan_1"]
+list(node.access_tags)  # [] -- no tags of its own
+list(node.effective_access_tags)  # ['data_A'] -- inherited from experiment
+```
+
+Policies that call an external decision service
+(`ExternalPolicyDecisionPoint`) send it the node's effective tags when asking
+which scopes a user has on a node. Their listings and searches filter on tags,
+so inheritance applies to them as well.
+
 ### New nodes
 
-By default, a node created without access tags is stored without tags, so it
-inherits from its parent. To keep the older behavior, in which such a node is
-tagged with its creator's user tag (e.g. `user:alice`) and is private to them,
-set `tag_new_nodes_with_owner` in the policy's arguments:
+By default, a node created without access tags is tagged with its creator's
+user tag (e.g. `user:alice`), so it is private to them. To have such nodes
+left untagged, so that they inherit from their parent, set
+`tag_new_nodes_with_owner: false` in the policy's arguments:
 
 ```yaml
 access_control:
@@ -127,15 +142,21 @@ access_control:
   args:
     provider: "pam"
     access_tags_parser: "tiled.access_control.access_tags:AccessTagsParser"
-    tag_new_nodes_with_owner: true
+    tag_new_nodes_with_owner: false
 ```
+
+To create a node that inherits, pass an empty list of tags
+(`access_tags=[]`). With `tag_new_nodes_with_owner: false`, anyone who can
+create the node can do this. With the default, only Tiled admins can.
 
 Only Tiled admins can remove every tag from an existing node, so only they can
 make a tagged node go back to inheriting.
 
-Graph entities created through the GraphQL interface do not inherit tags. When
-`tag_new_nodes_with_owner` is off, a graph entity created without tags is
-visible only to admins until someone tags it.
+Graph entities created through the GraphQL interface do not inherit tags. An
+untagged graph entity is visible only to admins until someone tags it.
+Creating one without tags gives it its creator's user tag by default, and
+leaves it untagged with `tag_new_nodes_with_owner: false`. An empty list of
+tags follows the same rules as for nodes.
 
 The compiler writes the compiled tag definitions into the catalog database itself,
 where the tiled server reads them. Compile the tags before writing tagged data:

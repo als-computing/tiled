@@ -218,8 +218,8 @@ def _server_config(catalog_uri, authn_uri, tmp_path):
                 "access_tags_parser": (
                     "tiled.access_control.access_tags:AccessTagsParser"
                 ),
-                # Most tests here exercise user-owned nodes. Tests of the
-                # default (untagged nodes inherit) opt out per client.
+                # The default. Tests of new nodes that inherit opt out per
+                # client.
                 "tag_new_nodes_with_owner": True,
             },
         },
@@ -1395,9 +1395,9 @@ def test_no_tagged_ancestor_locks_node(
 
 def test_new_node_without_tags_inherits(access_control_test_context_factory):
     """
-    By default (tag_new_nodes_with_owner=False), a node created without
-    access tags is left untagged, so it inherits its parent's tags rather than
-    being private to its creator.
+    With tag_new_nodes_with_owner=False, a node created without access tags is
+    left untagged, so it inherits its parent's tags rather than being private
+    to its creator.
     """
     alice_client = access_control_test_context_factory(
         "alice", "alice", tag_new_nodes_with_owner=False
