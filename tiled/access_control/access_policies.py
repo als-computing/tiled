@@ -74,16 +74,17 @@ class TagBasedAccessPolicy(AccessPolicy):
         provider,
         access_tags_parser,
         scopes=None,
-        tag_new_nodes_with_owner=False,
+        tag_new_nodes_with_owner=True,
     ):
         """
         Parameters
         ----------
         tag_new_nodes_with_owner : bool, optional
-            If True, a node created without access tags is tagged with its
-            creator's principal tag (e.g. 'user:alice'), making it private to
-            them. By default, it is left untagged and so inherits the tags of
-            its nearest tagged ancestor.
+            If True (the default), a node created without access tags is tagged
+            with its creator's principal tag (e.g. 'user:alice'), making it
+            private to them. If False, it is left untagged, as is a node created
+            with an empty list of tags, and so inherits the tags of its nearest
+            tagged ancestor.
         """
         self.provider = provider
         self.tag_new_nodes_with_owner = tag_new_nodes_with_owner
@@ -152,6 +153,14 @@ class TagBasedAccessPolicy(AccessPolicy):
                     "e.g. ['tag1', 'tag2', ...]\n"
                     f"Received {access_tags=}"
                 ) from exc
+
+        if not access_tags and not self.tag_new_nodes_with_owner:
+            # No tags, or an empty list of them: the node is left untagged and
+            # inherits the tags of its nearest tagged ancestor. An empty list
+            # asked for exactly that, so only None counts as modified.
+            access_tags_from_policy = normalize_access_tags()
+            access_tags_modified = access_tags is None
+        elif access_tags is not None:
             if not access_tags:
                 if not self._is_admin(authn_scopes):
                     raise ValueError(
@@ -212,11 +221,6 @@ class TagBasedAccessPolicy(AccessPolicy):
                         f"These access tags do not confer the minimum scopes: "
                         f"{sorted(scope.value for scope in self.unremovable_scopes)}"
                     )
-        elif not self.tag_new_nodes_with_owner:
-            # No tags of its own: the node inherits the tags of its nearest
-            # tagged ancestor.
-            access_tags_from_policy = normalize_access_tags()
-            access_tags_modified = True
         else:
             if (
                 authn_access_tags is not None
